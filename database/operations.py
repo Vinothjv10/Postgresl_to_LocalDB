@@ -64,12 +64,29 @@ def fetch_last_n_records(
 #  TARGET DB — WRITE QUERIES (local only)
 # ──────────────────────────────────────────────
 
-def ensure_schema_exists(db: DatabaseManager, schema: str):
+def schema_exists(db: DatabaseManager, schema: str) -> bool:
     with db.cursor() as cur:
         cur.execute(
-            sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+            "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = %s)",
+            (schema,),
         )
-    logger.info("Ensured schema '%s' exists in target", schema)
+        return cur.fetchone()[0]
+
+
+def create_schema(db: DatabaseManager, schema: str):
+    with db.cursor() as cur:
+        cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+    logger.info("Created schema '%s' in target", schema)
+
+
+def table_exists(db: DatabaseManager, table: TableConfig) -> bool:
+    with db.cursor() as cur:
+        cur.execute(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = %s AND table_name = %s)",
+            (table.schema_name, table.table_name),
+        )
+        return cur.fetchone()[0]
 
 
 def build_create_table_ddl(source_db: DatabaseManager, table: TableConfig) -> Optional[str]:
@@ -77,20 +94,21 @@ def build_create_table_ddl(source_db: DatabaseManager, table: TableConfig) -> Op
         cur.execute(
             """
             SELECT
-                'CREATE TABLE IF NOT EXISTS ' || quote_ident(%s) || '.' || quote_ident(%s) || ' (' ||
+                'CREATE TABLE ' || quote_ident(%s) || '.' || quote_ident(%s) || ' (' ||
                 string_agg(
-                    quote_ident(column_name) || ' ' || data_type ||
-                    CASE WHEN character_maximum_length IS NOT NULL
-                        THEN '(' || character_maximum_length || ')'
-                        ELSE ''
-                    END ||
-                    CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END,
+                    quote_ident(a.attname) || ' ' ||
+                    pg_catalog.format_type(a.atttypid, a.atttypmod) ||
+                    CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END,
                     ', '
-                    ORDER BY ordinal_position
+                    ORDER BY a.attnum
                 ) || ')' AS ddl
-            FROM information_schema.columns
-            WHERE table_schema = %s AND table_name = %s
-            GROUP BY table_schema, table_name
+            FROM pg_catalog.pg_attribute a
+            JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+            JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
             """,
             (table.schema_name, table.table_name, table.schema_name, table.table_name),
         )
@@ -98,19 +116,10 @@ def build_create_table_ddl(source_db: DatabaseManager, table: TableConfig) -> Op
         return row[0] if row else None
 
 
-def ensure_table_exists(db: DatabaseManager, table: TableConfig, source_db: DatabaseManager):
-    ddl = build_create_table_ddl(source_db, table)
-    if not ddl:
-        raise RuntimeError(f"Could not build DDL for {table.full_name}")
-
+def create_table(db: DatabaseManager, table: TableConfig, ddl: str):
     with db.cursor() as cur:
-        cur.execute(
-            sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
-                sql.Identifier(table.schema_name)
-            )
-        )
         cur.execute(ddl)
-    logger.info("Ensured table '%s' exists in target", table.full_name)
+    logger.info("Created table '%s' in target", table.full_name)
 
 
 def insert_records(

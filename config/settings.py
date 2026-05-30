@@ -1,4 +1,4 @@
-from pathlib import Path
+from urllib.parse import quote_plus
 
 from dotenv import load_dotenv
 
@@ -25,11 +25,19 @@ class Settings:
 
     @property
     def source_dsn(self) -> str:
-        return f"postgresql://{self.source_user}:{self.source_password}@{self.source_host}:{self.source_port}/{self.source_db}"
+        return (
+            f"postgresql://{quote_plus(self.source_user)}"
+            f":{quote_plus(self.source_password)}"
+            f"@{self.source_host}:{self.source_port}/{self.source_db}"
+        )
 
     @property
     def target_dsn(self) -> str:
-        return f"postgresql://{self.target_user}:{self.target_password}@{self.target_host}:{self.target_port}/{self.target_db}"
+        return (
+            f"postgresql://{quote_plus(self.target_user)}"
+            f":{quote_plus(self.target_password)}"
+            f"@{self.target_host}:{self.target_port}/{self.target_db}"
+        )
 
 
 settings = Settings()

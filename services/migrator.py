@@ -5,11 +5,14 @@ from typing import List
 from config.settings import Settings
 from database.connection import DatabaseManager
 from database.operations import (
-    ensure_schema_exists,
-    ensure_table_exists,
+    build_create_table_ddl,
+    create_schema,
+    create_table,
     fetch_last_n_records,
     fetch_table_columns,
     insert_records,
+    schema_exists,
+    table_exists,
 )
 from models.schemas import TableConfig
 
@@ -65,8 +68,18 @@ class DataMigrator:
 
         logger.info("Fetched %d records from %s", len(records), table.full_name)
 
-        ensure_schema_exists(self.target_db, table.schema_name)
-        ensure_table_exists(self.target_db, table, self.source_db)
+        if not schema_exists(self.target_db, table.schema_name):
+            create_schema(self.target_db, table.schema_name)
+        else:
+            logger.info("Schema '%s' already exists in target", table.schema_name)
+
+        if not table_exists(self.target_db, table):
+            ddl = build_create_table_ddl(self.source_db, table)
+            if not ddl:
+                raise RuntimeError(f"Could not build DDL for {table.full_name}")
+            create_table(self.target_db, table, ddl)
+        else:
+            logger.info("Table '%s' already exists in target", table.full_name)
 
         insert_records(self.target_db, table, columns, records, self.batch_size)
 

@@ -6,8 +6,9 @@ from psycopg2.extras import DictCursor
 
 
 class DatabaseManager:
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, label: str = "db"):
         self._dsn = dsn
+        self._label = label
         self._conn = None
 
     def connect(self):
@@ -15,6 +16,16 @@ class DatabaseManager:
             self._conn = psycopg2.connect(self._dsn)
             self._conn.autocommit = False
         return self._conn
+
+    def check_connection(self) -> tuple[bool, str]:
+        try:
+            conn = self.connect()
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            cur.close()
+            return True, ""
+        except Exception as e:
+            return False, str(e)
 
     def close(self):
         if self._conn and not self._conn.closed:

@@ -71,8 +71,28 @@ def main():
     if args.batch_size:
         settings.batch_size = args.batch_size
 
-    source_db = DatabaseManager(settings.source_dsn)
-    target_db = DatabaseManager(settings.target_dsn)
+    source_db = DatabaseManager(settings.source_dsn, label="source")
+    target_db = DatabaseManager(settings.target_dsn, label="target")
+
+    source_ok, source_err = source_db.check_connection()
+    if not source_ok:
+        logger.error(
+            "Source database connection failed at %s:%s/%s — %s",
+            settings.source_host, settings.source_port, settings.source_db,
+            source_err,
+        )
+        sys.exit(1)
+    logger.info("Source database connection OK")
+
+    target_ok, target_err = target_db.check_connection()
+    if not target_ok:
+        logger.error(
+            "Target database connection failed at %s:%s/%s — %s",
+            settings.target_host, settings.target_port, settings.target_db,
+            target_err,
+        )
+        sys.exit(1)
+    logger.info("Target database connection OK")
 
     try:
         migrator = DataMigrator(tables, source_db, target_db, settings)
