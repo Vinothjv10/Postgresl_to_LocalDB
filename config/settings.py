@@ -21,7 +21,7 @@ class Settings:
     target_password: str = os.getenv("TARGET_DB_PASSWORD", "postgres")
 
     batch_size: int = int(os.getenv("BATCH_SIZE", "10000"))
-    limit: int = int(os.getenv("RECORD_LIMIT", "100000"))
+    limit: int = int(os.getenv("RECORD_LIMIT", "1000000"))
 
     @property
     def source_dsn(self) -> str:

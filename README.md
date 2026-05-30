@@ -1,6 +1,6 @@
 # Postgres_to_LocalDB
 
-Migrate the last **1,00,000 records** from each PostgreSQL table (source) into a local PostgreSQL database (target).
+Migrate the last **10,00,000 records** from each PostgreSQL table (source) into a local PostgreSQL database (target).
 
 ## Project Structure
 
