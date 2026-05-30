@@ -74,6 +74,7 @@ def main():
     source_db = DatabaseManager(settings.source_dsn, label="source")
     target_db = DatabaseManager(settings.target_dsn, label="target")
 
+    logger.info("Connecting to source: %s@%s:%s/%s", settings.source_user, settings.source_host, settings.source_port, settings.source_db)
     source_ok, source_err = source_db.check_connection()
     if not source_ok:
         logger.error(
@@ -84,6 +85,7 @@ def main():
         sys.exit(1)
     logger.info("Source database connection OK")
 
+    logger.info("Connecting to target: %s@%s:%s/%s", settings.target_user, settings.target_host, settings.target_port, settings.target_db)
     target_ok, target_err = target_db.check_connection()
     if not target_ok:
         logger.error(

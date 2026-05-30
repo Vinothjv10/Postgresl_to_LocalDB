@@ -42,7 +42,10 @@ class DatabaseManager:
         try:
             conn = self.connect()
             cur = conn.cursor()
+            logger.info("SQL: SELECT 1 — checking %s connection", self._label)
             cur.execute("SELECT 1")
+            result = cur.fetchone()
+            logger.info("RESULT: %s — %s", self._label, result)
             cur.close()
             return True, ""
         except Exception as e:
