@@ -1,7 +1,8 @@
 import logging
-from typing import List, Optional
+from typing import Generator, List, Optional
 
 from psycopg2 import sql
+from psycopg2.extras import execute_values
 
 from database.connection import DatabaseManager
 from models.schemas import TableConfig
@@ -23,15 +24,12 @@ def fetch_table_columns(db: DatabaseManager, table: TableConfig) -> List[str]:
         return [row[0] for row in cur.fetchall()]
 
 
-def fetch_last_n_records(
+def stream_records(
     db: DatabaseManager,
     table: TableConfig,
     limit: int,
     batch_size: int,
-) -> List[tuple]:
-    records: List[tuple] = []
-    offset = 0
-
+) -> Generator[List[tuple], None, None]:
     with db.cursor() as cur:
         cur.execute(
             sql.SQL("SELECT COUNT(*) FROM {}").format(
@@ -41,23 +39,91 @@ def fetch_last_n_records(
         total = cur.fetchone()[0]
         fetch_limit = min(limit, total)
 
+        if fetch_limit == 0:
+            return
+
+        order_col = _get_order_column(cur, table)
+        offset = 0
+
         while offset < fetch_limit:
             remaining = fetch_limit - offset
             current_batch = min(batch_size, remaining)
             query = sql.SQL(
-                "SELECT * FROM {} ORDER BY ctid DESC LIMIT %s OFFSET %s"
-            ).format(sql.Identifier(table.schema_name, table.table_name))
+                "SELECT * FROM {} ORDER BY {} DESC LIMIT %s OFFSET %s"
+            ).format(
+                sql.Identifier(table.schema_name, table.table_name),
+                sql.Identifier(order_col),
+            )
             cur.execute(query, (current_batch, offset))
             batch = cur.fetchall()
             if not batch:
                 break
-            records.extend(batch)
+            yield [tuple(row) for row in batch]
             offset += current_batch
             logger.info(
                 "Fetched %d/%d records from %s", offset, fetch_limit, table.full_name
             )
 
-    return records
+
+def _get_order_column(cur, table: TableConfig) -> str:
+    cur.execute(
+        """
+        SELECT a.attname
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+        JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = %s AND c.relname = %s
+          AND a.attnum > 0 AND NOT a.attisdropped
+          AND a.attidentity IN ('a', 'd')
+        ORDER BY a.attnum
+        LIMIT 1
+        """,
+        (table.schema_name, table.table_name),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        """
+        SELECT a.attname
+        FROM pg_catalog.pg_index i
+        JOIN pg_catalog.pg_attribute a
+          ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        JOIN pg_catalog.pg_class c ON i.indrelid = c.oid
+        JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = %s AND c.relname = %s
+          AND i.indisprimary
+        ORDER BY a.attnum
+        LIMIT 1
+        """,
+        (table.schema_name, table.table_name),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    cur.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = %s AND table_name = %s
+          AND (data_type LIKE 'timestamp%' OR data_type LIKE 'date%')
+        ORDER BY ordinal_position
+        LIMIT 1
+        """,
+        (table.schema_name, table.table_name),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
+
+    logger.warning(
+        "No identity/pk/timestamp column found for %s — falling back to ctid "
+        "(ordering may be unreliable after VACUUM)",
+        table.full_name,
+    )
+    return "ctid"
 
 
 # ──────────────────────────────────────────────
@@ -67,7 +133,7 @@ def fetch_last_n_records(
 def schema_exists(db: DatabaseManager, schema: str) -> bool:
     with db.cursor() as cur:
         cur.execute(
-            "SELECT EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name = %s)",
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s)",
             (schema,),
         )
         return cur.fetchone()[0]
@@ -96,21 +162,40 @@ def build_create_table_ddl(source_db: DatabaseManager, table: TableConfig) -> Op
             SELECT
                 'CREATE TABLE ' || quote_ident(%s) || '.' || quote_ident(%s) || ' (' ||
                 string_agg(
-                    quote_ident(a.attname) || ' ' ||
-                    pg_catalog.format_type(a.atttypid, a.atttypmod) ||
-                    CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END,
+                    col_def,
                     ', '
                     ORDER BY a.attnum
                 ) || ')' AS ddl
-            FROM pg_catalog.pg_attribute a
-            JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
-            JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
-            WHERE n.nspname = %s
-              AND c.relname = %s
-              AND a.attnum > 0
-              AND NOT a.attisdropped
+            FROM (
+                SELECT
+                    a.attnum,
+                    quote_ident(a.attname) || ' ' ||
+                    pg_catalog.format_type(a.atttypid, a.atttypmod) ||
+                    CASE
+                        WHEN a.attidentity = 'a' THEN ' GENERATED BY DEFAULT AS IDENTITY'
+                        WHEN a.attidentity = 'd' THEN ' GENERATED ALWAYS AS IDENTITY'
+                        ELSE ''
+                    END ||
+                    CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END ||
+                    CASE WHEN d.adbin IS NOT NULL
+                        THEN ' DEFAULT ' || pg_catalog.pg_get_expr(d.adbin, d.adrelid)
+                        ELSE ''
+                    END AS col_def
+                FROM pg_catalog.pg_attribute a
+                JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+                JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+                LEFT JOIN pg_catalog.pg_attrdef d
+                    ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+                WHERE n.nspname = %s
+                  AND c.relname = %s
+                  AND a.attnum > 0
+                  AND NOT a.attisdropped
+            ) sub
             """,
-            (table.schema_name, table.table_name, table.schema_name, table.table_name),
+            (
+                table.schema_name, table.table_name,
+                table.schema_name, table.table_name,
+            ),
         )
         row = cur.fetchone()
         return row[0] if row else None
@@ -122,31 +207,39 @@ def create_table(db: DatabaseManager, table: TableConfig, ddl: str):
     logger.info("Created table '%s' in target", table.full_name)
 
 
-def insert_records(
+def insert_records_batch(
     db: DatabaseManager,
     table: TableConfig,
     columns: List[str],
     records: List[tuple],
-    batch_size: int,
 ):
     if not records:
-        logger.info("No records to insert into %s", table.full_name)
         return
 
-    with db.cursor() as cur:
-        insert_query = sql.SQL("INSERT INTO {} ({}) VALUES ({})").format(
-            sql.Identifier(table.schema_name, table.table_name),
-            sql.SQL(", ").join(map(sql.Identifier, columns)),
-            sql.SQL(", ").join([sql.Placeholder()] * len(columns)),
-        )
+    insert_sql = sql.SQL("INSERT INTO {} ({}) VALUES %s").format(
+        sql.Identifier(table.schema_name, table.table_name),
+        sql.SQL(", ").join(map(sql.Identifier, columns)),
+    )
 
-        for i in range(0, len(records), batch_size):
-            batch = records[i : i + batch_size]
-            values = [tuple(row) for row in batch]
-            cur.executemany(insert_query, values)
-            logger.info(
-                "Inserted %d/%d records into %s",
-                min(i + batch_size, len(records)),
-                len(records),
-                table.full_name,
-            )
+    with db.cursor() as cur:
+        execute_values(cur, insert_sql, records, template=None, page_size=len(records))
+
+
+def insert_records_stream(
+    db: DatabaseManager,
+    table: TableConfig,
+    columns: List[str],
+    record_stream: Generator[List[tuple], None, None],
+    batch_size: int,
+) -> int:
+    total = 0
+    for batch in record_stream:
+        insert_records_batch(db, table, columns, batch)
+        total += len(batch)
+        logger.info(
+            "Inserted %d records into %s (running total: %d)",
+            len(batch),
+            table.full_name,
+            total,
+        )
+    return total
