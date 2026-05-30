@@ -6,7 +6,7 @@ Migrate the last **1,00,000 records** from each PostgreSQL table (source) into a
 
 ```
 ├── config/
-│   ├── settings.py           # Loads env/<env>/.env and exposes DSNs + batch config
+│   ├── settings.py           # Loads .env and exposes DSNs + batch config
 │   └── yaml_config.py        # Reads tables_config.yaml
 ├── database/
 │   ├── connection.py         # DatabaseManager — connection lifecycle + context managers
@@ -15,43 +15,51 @@ Migrate the last **1,00,000 records** from each PostgreSQL table (source) into a
 │   └── migrator.py           # DataMigrator — orchestrates migration per table
 ├── models/
 │   └── schemas.py            # TableConfig & AppConfig dataclasses
-├── env/                      # Environment-specific .env files
-│   ├── dev/.env
-│   ├── staging/.env
-│   └── prod/.env
+├── venv/                     # Virtual environment (not committed)
 ├── main.py                   # CLI entry point
-└── tables_config.yaml        # List of schema.table to migrate
+├── tables_config.yaml        # List of schema.table to migrate
+├── .env                      # DB credentials (not committed)
+└── .env.example              # Template for .env
+```
+
+## Setup
+
+```bash
+# Create virtual environment and install dependencies
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Configure credentials
+cp .env.example .env
+# Edit .env with your source and target DB credentials
 ```
 
 ## Usage
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+source venv/bin/activate
 
-# Set up your env file (edit env/<env>/.env with your DB credentials)
-cp .env.example env/dev/.env
-
-# List tables
-python main.py --env dev --list-tables
+# List configured tables
+python main.py --list-tables
 
 # Run migration
-python main.py --env dev
+python main.py
 
-# Override limits
-python main.py --env dev --limit 50000 --batch-size 5000
+# Override defaults
+python main.py --limit 50000 --batch-size 5000
 ```
 
-### Key Design
+## Key Design
 
 | Layer | Directory | Responsibility |
 |-------|-----------|----------------|
-| **Config** | `config/` | Environment resolution (env folder), YAML table list |
+| **Config** | `config/` | .env resolution, YAML table list |
 | **Database** | `database/` | Connection mgmt, source reads (SELECT only), target writes |
 | **Service** | `services/` | Migration orchestration |
 | **Models** | `models/` | Typed dataclasses |
 
-### Safety
+## Safety
 
 - **Source database** is strictly read-only — only `SELECT` queries are issued.
 - **Target database** receives schema creation (`CREATE TABLE IF NOT EXISTS`) and `INSERT` operations.

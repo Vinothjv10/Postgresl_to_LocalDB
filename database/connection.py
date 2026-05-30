@@ -4,6 +4,7 @@ from typing import Generator
 import psycopg2
 from psycopg2.extras import DictCursor
 
+
 class DatabaseManager:
     def __init__(self, dsn: str):
         self._dsn = dsn
@@ -38,4 +39,3 @@ class DatabaseManager:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
-

@@ -2,7 +2,7 @@ import argparse
 import logging
 import sys
 
-from config.settings import Settings
+from config.settings import settings
 from config.yaml_config import load_tables_from_yaml
 from database.connection import DatabaseManager
 from services.migrator import DataMigrator
@@ -22,12 +22,6 @@ def parse_args():
         description="Migrate last N records from source PostgreSQL tables to local PostgreSQL."
     )
     parser.add_argument(
-        "-e", "--env",
-        default="dev",
-        choices=["dev", "staging", "prod"],
-        help="Environment to use (dev, staging, prod). Default: dev",
-    )
-    parser.add_argument(
         "-c", "--config",
         default="tables_config.yaml",
         help="Path to YAML config file with table list (default: tables_config.yaml)",
@@ -36,13 +30,13 @@ def parse_args():
         "--limit",
         type=int,
         default=None,
-        help="Override record limit per table",
+        help="Override record limit per table (default: from .env or 100000)",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
-        help="Override batch size for fetch/insert",
+        help="Override batch size for fetch/insert (default: from .env or 10000)",
     )
     parser.add_argument(
         "--list-tables",
@@ -56,26 +50,18 @@ def main():
     args = parse_args()
 
     try:
-        settings = Settings(env=args.env)
-    except FileNotFoundError as e:
-        logger.error(e)
-        sys.exit(1)
-
-    try:
         tables = load_tables_from_yaml(args.config)
     except (FileNotFoundError, ValueError) as e:
         logger.error(e)
         sys.exit(1)
 
     if args.list_tables:
-        print(f"Environment: {args.env}")
         print(f"Tables loaded from '{args.config}':")
         for t in tables:
             print(f"  - {t.full_name}")
         print(f"\nTotal: {len(tables)} tables")
         return
 
-    logger.info("Environment: %s", args.env)
     logger.info("Loaded %d tables from '%s'", len(tables), args.config)
     for t in tables:
         logger.info("  - %s", t.full_name)
