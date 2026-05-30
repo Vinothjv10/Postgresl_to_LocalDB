@@ -2,7 +2,9 @@ import argparse
 import logging
 import sys
 
+from config.settings import Settings
 from config.yaml_config import load_tables_from_yaml
+from database.connection import DatabaseManager
 from services.migrator import DataMigrator
 
 logging.basicConfig(
@@ -20,6 +22,12 @@ def parse_args():
         description="Migrate last N records from source PostgreSQL tables to local PostgreSQL."
     )
     parser.add_argument(
+        "-e", "--env",
+        default="dev",
+        choices=["dev", "staging", "prod"],
+        help="Environment to use (dev, staging, prod). Default: dev",
+    )
+    parser.add_argument(
         "-c", "--config",
         default="tables_config.yaml",
         help="Path to YAML config file with table list (default: tables_config.yaml)",
@@ -28,13 +36,13 @@ def parse_args():
         "--limit",
         type=int,
         default=None,
-        help="Override record limit per table (default: value from env or 100000)",
+        help="Override record limit per table",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=None,
-        help="Override batch size for fetch/insert (default: value from env or 10000)",
+        help="Override batch size for fetch/insert",
     )
     parser.add_argument(
         "--list-tables",
@@ -48,31 +56,44 @@ def main():
     args = parse_args()
 
     try:
+        settings = Settings(env=args.env)
+    except FileNotFoundError as e:
+        logger.error(e)
+        sys.exit(1)
+
+    try:
         tables = load_tables_from_yaml(args.config)
     except (FileNotFoundError, ValueError) as e:
         logger.error(e)
         sys.exit(1)
 
     if args.list_tables:
+        print(f"Environment: {args.env}")
         print(f"Tables loaded from '{args.config}':")
         for t in tables:
             print(f"  - {t.full_name}")
         print(f"\nTotal: {len(tables)} tables")
         return
 
+    logger.info("Environment: %s", args.env)
     logger.info("Loaded %d tables from '%s'", len(tables), args.config)
     for t in tables:
         logger.info("  - %s", t.full_name)
 
     if args.limit:
-        from config.settings import settings
         settings.limit = args.limit
     if args.batch_size:
-        from config.settings import settings
         settings.batch_size = args.batch_size
 
-    migrator = DataMigrator(tables)
-    migrator.run()
+    source_db = DatabaseManager(settings.source_dsn)
+    target_db = DatabaseManager(settings.target_dsn)
+
+    try:
+        migrator = DataMigrator(tables, source_db, target_db, settings)
+        migrator.run()
+    finally:
+        source_db.close()
+        target_db.close()
 
 
 if __name__ == "__main__":

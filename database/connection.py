@@ -2,11 +2,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 import psycopg2
-from psycopg2 import sql
 from psycopg2.extras import DictCursor
-
-from config.settings import settings
-
 
 class DatabaseManager:
     def __init__(self, dsn: str):
@@ -43,6 +39,3 @@ class DatabaseManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.close()
 
-
-source_db = DatabaseManager(settings.source_dsn)
-target_db = DatabaseManager(settings.target_dsn)

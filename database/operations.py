@@ -8,60 +8,19 @@ from models.schemas import TableConfig
 
 logger = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────
+#  SOURCE DB — READ-ONLY QUERIES (SELECT only)
+# ──────────────────────────────────────────────
 
-def ensure_schema_exists(db: DatabaseManager, schema: str):
+def fetch_table_columns(db: DatabaseManager, table: TableConfig) -> List[str]:
     with db.cursor() as cur:
         cur.execute(
-            sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s "
+            "ORDER BY ordinal_position",
+            (table.schema_name, table.table_name),
         )
-    logger.info("Ensured schema '%s' exists", schema)
-
-
-def ensure_table_exists(db: DatabaseManager, table: TableConfig, source_db: DatabaseManager):
-    ddl = get_table_ddl(source_db, table)
-    if not ddl:
-        raise RuntimeError(f"Could not get DDL for {table.full_name}")
-
-    with db.cursor() as cur:
-        cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(table.schema_name)))
-        cur.execute(ddl)
-    logger.info("Ensured table '%s' exists in target", table.full_name)
-
-
-def get_table_ddl(db: DatabaseManager, table: TableConfig) -> Optional[str]:
-    with db.cursor() as cur:
-        cur.execute(
-            """
-            SELECT pg_get_server_def(pg_class.oid)
-            FROM pg_class
-            INNER JOIN pg_namespace ON pg_class.relnamespace = pg_namespace.oid
-            WHERE pg_namespace.nspname = %s AND pg_class.relname = %s
-            """,
-            (table.schema_name, table.table_name)
-        )
-        row = cur.fetchone()
-        if not row:
-            cur.execute(
-                """
-                SELECT
-                    'CREATE TABLE ' || quote_ident(%s) || '.' || quote_ident(%s) || ' (' ||
-                    string_agg(
-                        quote_ident(column_name) || ' ' || data_type ||
-                        CASE WHEN character_maximum_length IS NOT NULL
-                            THEN '(' || character_maximum_length || ')'
-                            ELSE ''
-                        END ||
-                        CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END,
-                        ', '
-                    ) || ')' AS ddl
-                FROM information_schema.columns
-                WHERE table_schema = %s AND table_name = %s
-                GROUP BY table_schema, table_name
-                """,
-                (table.schema_name, table.table_name, table.schema_name, table.table_name)
-            )
-            row = cur.fetchone()
-        return row[0] if row else None
+        return [row[0] for row in cur.fetchall()]
 
 
 def fetch_last_n_records(
@@ -72,13 +31,14 @@ def fetch_last_n_records(
 ) -> List[tuple]:
     records: List[tuple] = []
     offset = 0
-    with db.cursor() as cur:
-        count_query = sql.SQL("SELECT COUNT(*) FROM {}").format(
-            sql.Identifier(table.schema_name, table.table_name)
-        )
-        cur.execute(count_query)
-        total = cur.fetchone()[0]
 
+    with db.cursor() as cur:
+        cur.execute(
+            sql.SQL("SELECT COUNT(*) FROM {}").format(
+                sql.Identifier(table.schema_name, table.table_name)
+            )
+        )
+        total = cur.fetchone()[0]
         fetch_limit = min(limit, total)
 
         while offset < fetch_limit:
@@ -96,7 +56,61 @@ def fetch_last_n_records(
             logger.info(
                 "Fetched %d/%d records from %s", offset, fetch_limit, table.full_name
             )
+
     return records
+
+
+# ──────────────────────────────────────────────
+#  TARGET DB — WRITE QUERIES (local only)
+# ──────────────────────────────────────────────
+
+def ensure_schema_exists(db: DatabaseManager, schema: str):
+    with db.cursor() as cur:
+        cur.execute(
+            sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+        )
+    logger.info("Ensured schema '%s' exists in target", schema)
+
+
+def build_create_table_ddl(source_db: DatabaseManager, table: TableConfig) -> Optional[str]:
+    with source_db.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+                'CREATE TABLE IF NOT EXISTS ' || quote_ident(%s) || '.' || quote_ident(%s) || ' (' ||
+                string_agg(
+                    quote_ident(column_name) || ' ' || data_type ||
+                    CASE WHEN character_maximum_length IS NOT NULL
+                        THEN '(' || character_maximum_length || ')'
+                        ELSE ''
+                    END ||
+                    CASE WHEN is_nullable = 'NO' THEN ' NOT NULL' ELSE '' END,
+                    ', '
+                    ORDER BY ordinal_position
+                ) || ')' AS ddl
+            FROM information_schema.columns
+            WHERE table_schema = %s AND table_name = %s
+            GROUP BY table_schema, table_name
+            """,
+            (table.schema_name, table.table_name, table.schema_name, table.table_name),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def ensure_table_exists(db: DatabaseManager, table: TableConfig, source_db: DatabaseManager):
+    ddl = build_create_table_ddl(source_db, table)
+    if not ddl:
+        raise RuntimeError(f"Could not build DDL for {table.full_name}")
+
+    with db.cursor() as cur:
+        cur.execute(
+            sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(
+                sql.Identifier(table.schema_name)
+            )
+        )
+        cur.execute(ddl)
+    logger.info("Ensured table '%s' exists in target", table.full_name)
 
 
 def insert_records(
@@ -127,12 +141,3 @@ def insert_records(
                 len(records),
                 table.full_name,
             )
-
-
-def truncate_table(db: DatabaseManager, table: TableConfig):
-    with db.cursor() as cur:
-        query = sql.SQL("TRUNCATE TABLE {}").format(
-            sql.Identifier(table.schema_name, table.table_name)
-        )
-        cur.execute(query)
-    logger.info("Truncated table %s", table.full_name)
